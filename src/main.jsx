@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut } from "firebase/auth";
 import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "firebase/auth";import {
   addDoc,
   collection,
   doc,
@@ -43,6 +46,8 @@ const userRoles = {
 };
 function App() {
   const [user, setUser] = useState(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [role, setRole] = useState(null);
   const [selectedTechId, setSelectedTechId] = useState("");
   const [cdkText, setCdkText] = useState(sample);
@@ -80,8 +85,13 @@ useEffect(() => {
   const openMessages = messages.filter((m) => m.status === "Open");
   const myNotifications = notifications.filter((n) => role === "dispatcher" ? n.audience === "Dispatch" : n.audience === selectedTech?.name);
 
-  async function login() { await signInWithPopup(auth, new GoogleAuthProvider()); }
-  async function addNotification(audience, title, body, ro = "") { await addDoc(collection(db, "notifications"), { audience, title, body, ro, read: false, createdAt: serverTimestamp() }); }
+async function login() {
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+  } catch (error) {
+    alert(error.message);
+  }
+}  async function addNotification(audience, title, body, ro = "") { await addDoc(collection(db, "notifications"), { audience, title, body, ro, read: false, createdAt: serverTimestamp() }); }
 
   async function addTech() {
     if (!newTechName.trim()) return;
@@ -116,8 +126,29 @@ useEffect(() => {
     setNotice("Message sent to dispatch.");
   }
 
-  if (!user) return <main className="page center"><section className="card login"><h1>CDK RO Skill Dispatcher</h1><p>Sign in to open the dispatcher or tech app.</p><Button onClick={login}>Sign in with Google</Button></section></main>;
+if (!user) return (
+  <main className="page center">
+    <section className="card login">
+      <h1>CDK RO Skill Dispatcher</h1>
+      <p>Sign in with your work email and password.</p>
 
+      <input
+        placeholder="Email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+
+      <input
+        placeholder="Password"
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+
+      <Button onClick={login}>Sign In</Button>
+    </section>
+  </main>
+);
   return <main className="page"><header className="top"><div><h1>CDK RO Skill Dispatcher</h1><p>Live shop dispatch board for CDK RO exports.</p></div><Button variant="secondary" onClick={() => signOut(auth)}>Sign Out</Button></header>
     <nav className="nav"><Button variant={role === "dispatcher" ? "primary" : "secondary"} onClick={() => setRole("dispatcher")}>Dispatcher</Button><Button variant={role === "tech" ? "primary" : "secondary"} onClick={() => setRole("tech")}>Tech App</Button>{role === "tech" && <Select value={selectedTechId || selectedTech?.id || ""} onChange={setSelectedTechId}>{techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</Select>}</nav>
     <p className="notice">{notice}</p>
