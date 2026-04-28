@@ -35,10 +35,15 @@ function useCollection(name) {
 
 function Button({ children, variant = "primary", ...props }) { return <button className={`btn ${variant}`} {...props}>{children}</button>; }
 function Select({ value, onChange, children }) { return <select value={value} onChange={(e) => onChange(e.target.value)}>{children}</select>; }
-
+const userRoles = {
+  "forneyc@autonation.com": {
+    role: "dispatcher",
+    techName: null
+  }
+};
 function App() {
   const [user, setUser] = useState(null);
-  const [role, setRole] = useState("tech");
+  const [role, setRole] = useState(null);
   const [selectedTechId, setSelectedTechId] = useState("");
   const [cdkText, setCdkText] = useState(sample);
   const [search, setSearch] = useState("");
@@ -52,7 +57,23 @@ function App() {
   const messages = useCollection("messages");
   const notifications = useCollection("notifications");
 
-  useEffect(() => onAuthStateChanged(auth, setUser), []);
+useEffect(() => {
+  return onAuthStateChanged(auth, (u) => {
+    setUser(u);
+
+    if (u) {
+      const userConfig = userRoles[u.email];
+
+      if (!userConfig) {
+        alert("Access denied");
+        signOut(auth);
+        return;
+      }
+
+      setRole(userConfig.role);
+    }
+  });
+}, []);
   const selectedTech = techs.find((t) => t.id === selectedTechId) || techs[0];
   const visibleJobs = role === "dispatcher" ? jobs : jobs.filter((job) => job.assignedTechId === selectedTech?.id);
   const filteredJobs = visibleJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
