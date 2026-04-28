@@ -150,8 +150,9 @@ if (!user) return (
   </main>
 );
   return <main className="page"><header className="top"><div><h1>CDK RO Skill Dispatcher</h1><p>Live shop dispatch board for CDK RO exports.</p></div><Button variant="secondary" onClick={() => signOut(auth)}>Sign Out</Button></header>
-    <nav className="nav"><Button variant={role === "dispatcher" ? "primary" : "secondary"} onClick={() => setRole("dispatcher")}>Dispatcher</Button><Button variant={role === "tech" ? "primary" : "secondary"} onClick={() => setRole("tech")}>Tech App</Button>{role === "tech" && <Select value={selectedTechId || selectedTech?.id || ""} onChange={setSelectedTechId}>{techs.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</Select>}</nav>
-    <p className="notice">{notice}</p>
+<nav className="nav">
+  <span>{role === "dispatcher" ? "Dispatcher View" : "Tech View"}</span>
+</nav>    <p className="notice">{notice}</p>
     <section className="grid stats"><div className="card"><b>ROs</b><h2>{visibleJobs.length}</h2></div><div className="card"><b>Notifications</b><h2>{myNotifications.length}</h2></div><div className="card"><b>Tech Alerts</b><h2>{openMessages.length}</h2></div></section>
     {role === "dispatcher" && <section className="grid two"><div className="card"><h2>Import CDK ROs</h2><textarea value={cdkText} onChange={(e) => setCdkText(e.target.value)} /><p>Format: RO, Vehicle, Concern, S-Code, Hours, Notes</p><Button onClick={importRows}>Import</Button><Button variant="secondary" onClick={dispatchAll}>Dispatch All Ready</Button></div><div className="card"><h2>Add Tech</h2><input placeholder="Tech name" value={newTechName} onChange={(e) => setNewTechName(e.target.value)} /><div className="chips">{skillTypes.map((s) => <button key={s} className={newTechSkills.includes(s) ? "chip active" : "chip"} onClick={() => setNewTechSkills((cur) => cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s])}>{s}</button>)}</div><Button onClick={addTech}>Add Tech</Button></div></section>}
     {role === "dispatcher" && <section className="card"><h2>Messages To Dispatch</h2>{openMessages.map((m) => <div className="alert" key={m.id}><b>RO {m.ro}: {m.reason}</b><p>{m.fromTech} — {m.note}</p><Button variant="secondary" onClick={() => updateDoc(doc(db, "messages", m.id), { status: "Resolved" })}>Resolve</Button></div>)}</section>}
