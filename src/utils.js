@@ -2,6 +2,13 @@ export const skillTypes = ["S10 Maintenance", "S12 Driveability", "S13 Warranty"
 export const statuses = ["Ready", "Dispatched", "Accepted", "In Progress", "Hold", "Completed"];
 export const messageReasons = ["Wrong Skill", "Already Being Worked By Another Tech", "Need Dispatch Help"];
 
+export function generateSetupCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
 export function toSafeHours(value) {
   const parsed = Number.parseFloat(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
