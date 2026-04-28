@@ -15,6 +15,83 @@ export function toSafeHours(value) {
   return Math.round(parsed * 10) / 10;
 }
 
+function toMillis(value) {
+  if (!value) return 0;
+  if (typeof value.toMillis === "function") return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function startOfToday(now = new Date()) {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+}
+
+export function getDateRangeFilter(range, now = new Date()) {
+  if (range === "today") {
+    const start = startOfToday(now);
+    return { start, end: start + 24 * 60 * 60 * 1000 };
+  }
+
+  if (range === "week") {
+    const today = new Date(startOfToday(now));
+    const start = new Date(today);
+    start.setDate(today.getDate() - today.getDay());
+    return { start: start.getTime(), end: now.getTime() + 1 };
+  }
+
+  if (range === "month") {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return { start, end: now.getTime() + 1 };
+  }
+
+  return { start: null, end: null };
+}
+
+export function filterJobsForReport(jobs, { dateRange = "all", techId = "all", skill = "all" } = {}) {
+  const { start, end } = getDateRangeFilter(dateRange);
+  return jobs.filter((job) => {
+    const jobTime = toMillis(job.updatedAt) || toMillis(job.createdAt);
+    const inDateRange = start === null || (jobTime >= start && jobTime < end);
+    const matchesTech = techId === "all" || job.assignedTechId === techId;
+    const matchesSkill = skill === "all" || job.skill === skill;
+    return inDateRange && matchesTech && matchesSkill;
+  });
+}
+
+export function sumHours(items, field = "hours") {
+  return items.reduce((total, item) => {
+    const value = field === "finalHours" ? item.finalHours ?? item.hours : item[field];
+    return total + toSafeHours(value);
+  }, 0);
+}
+
+export function buildTechPerformanceReport(jobs, techs, messages = []) {
+  return techs.map((tech) => {
+    const techJobs = jobs.filter((job) => job.assignedTechId === tech.id);
+    const completedJobs = techJobs.filter((job) => job.status === "Completed");
+    const finalHoursTotal = sumHours(completedJobs, "finalHours");
+    const estimatedHoursTotal = sumHours(completedJobs, "hours");
+    const alertsSent = messages.filter((message) => message.fromTech === tech.name).length;
+
+    return {
+      techId: tech.id,
+      name: tech.name,
+      completedRos: completedJobs.length,
+      finalHoursTotal,
+      estimatedHoursTotal,
+      difference: finalHoursTotal - estimatedHoursTotal,
+      averageFinalHours: completedJobs.length ? finalHoursTotal / completedJobs.length : 0,
+      openRos: techJobs.filter((job) => job.status !== "Completed").length,
+      inProgressRos: techJobs.filter((job) => job.status === "In Progress").length,
+      acceptedRos: techJobs.filter((job) => job.status === "Accepted").length,
+      waitingAcceptanceRos: techJobs.filter((job) => job.status === "Dispatched").length,
+      alertsSent
+    };
+  });
+}
+
 export function normalizeSkill(value) {
   const raw = String(value || "").toLowerCase().trim();
   if (raw.includes("s10")) return "S10 Maintenance";

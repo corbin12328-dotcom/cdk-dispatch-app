@@ -23,13 +23,17 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import {
+  buildTechPerformanceReport,
+  filterJobsForReport,
   generateSetupCode,
+  getDateRangeFilter,
   messageReasons,
   normalizeSkill,
   parseCdkText,
   pickRandomEligibleTech,
   skillTypes,
   statuses,
+  sumHours,
   toSafeHours
 } from "./utils";
 import "./styles.css";
@@ -76,6 +80,9 @@ function App() {
   const [newTechName, setNewTechName] = useState("");
   const [newTechSkills, setNewTechSkills] = useState([]);
   const [messageDrafts, setMessageDrafts] = useState({});
+  const [reportRange, setReportRange] = useState("month");
+  const [reportTechId, setReportTechId] = useState("all");
+  const [reportSkill, setReportSkill] = useState("all");
   const setupInProgress = useRef(false);
 
   const jobs = useCollection("jobs");
@@ -120,6 +127,30 @@ function App() {
   const filteredJobs = visibleJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
   const openMessages = messages.filter((m) => m.status === "Open");
   const myNotifications = notifications.filter((n) => role === "dispatcher" ? n.audience === "Dispatch" : n.audience === selectedTech?.name);
+  const reportJobs = filterJobsForReport(jobs, { dateRange: reportRange, techId: reportTechId, skill: reportSkill });
+  const completedReportJobs = reportJobs.filter((job) => job.status === "Completed");
+  const totalFinalHours = sumHours(completedReportJobs, "finalHours");
+  const totalEstimatedHours = sumHours(completedReportJobs, "hours");
+  const reportTechs = reportTechId === "all" ? techs : techs.filter((tech) => tech.id === reportTechId);
+  const reportDateFilter = getDateRangeFilter(reportRange);
+  const reportMessages = messages.filter((message) => {
+    const rawCreatedAt = typeof message.createdAt?.toMillis === "function" ? message.createdAt.toMillis() : message.createdAt;
+    const createdAt = Number(rawCreatedAt) || Date.parse(rawCreatedAt) || 0;
+    const inDateRange = reportDateFilter.start === null || (createdAt >= reportDateFilter.start && createdAt < reportDateFilter.end);
+    const matchesSkill = reportSkill === "all" || message.currentSkill === reportSkill;
+    return inDateRange && matchesSkill;
+  });
+  const techPerformance = buildTechPerformanceReport(reportJobs, reportTechs, reportMessages);
+  const reportCards = [
+    { label: "Total completed ROs", value: completedReportJobs.length },
+    { label: "Total final hours", value: totalFinalHours.toFixed(1) },
+    { label: "Total estimated hours", value: totalEstimatedHours.toFixed(1) },
+    { label: "Final vs estimated", value: (totalFinalHours - totalEstimatedHours).toFixed(1) },
+    { label: "Avg final hours per completed RO", value: completedReportJobs.length ? (totalFinalHours / completedReportJobs.length).toFixed(1) : "0.0" },
+    { label: "Open ROs", value: reportJobs.filter((job) => job.status !== "Completed").length },
+    { label: "Waiting acceptance", value: reportJobs.filter((job) => job.status === "Dispatched").length },
+    { label: "In progress", value: reportJobs.filter((job) => job.status === "In Progress").length }
+  ];
 
   async function login() {
     try {
@@ -399,6 +430,84 @@ function App() {
               <Button variant="secondary" onClick={() => updateDoc(doc(db, "messages", m.id), { status: "Resolved" })}>Resolve</Button>
             </div>
           ))}
+        </section>
+      )}
+
+      {role === "dispatcher" && (
+        <section className="card reports">
+          <div className="report-header">
+            <div>
+              <h2>Reports</h2>
+              <p>Hours and tech performance from Firestore jobs.</p>
+            </div>
+            <div className="report-filters">
+              <Select value={reportRange} onChange={setReportRange}>
+                <option value="today">Today</option>
+                <option value="week">This Week</option>
+                <option value="month">This Month</option>
+                <option value="all">All Time</option>
+              </Select>
+              <Select value={reportTechId} onChange={setReportTechId}>
+                <option value="all">All techs</option>
+                {techs.map((tech) => <option value={tech.id} key={tech.id}>{tech.name}</option>)}
+              </Select>
+              <Select value={reportSkill} onChange={setReportSkill}>
+                <option value="all">All S-codes</option>
+                {skillTypes.map((skill) => <option value={skill} key={skill}>{skill}</option>)}
+              </Select>
+            </div>
+          </div>
+
+          <div className="report-cards">
+            {reportCards.map((card) => (
+              <div className="report-card" key={card.label}>
+                <span>{card.label}</span>
+                <b>{card.value}</b>
+              </div>
+            ))}
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tech</th>
+                  <th>Completed ROs</th>
+                  <th>Final Hours</th>
+                  <th>Est Hours</th>
+                  <th>Diff</th>
+                  <th>Avg Final</th>
+                  <th>Open</th>
+                  <th>In Progress</th>
+                  <th>Accepted</th>
+                  <th>Waiting</th>
+                  <th>Alerts</th>
+                </tr>
+              </thead>
+              <tbody>
+                {techPerformance.map((row) => (
+                  <tr key={row.techId}>
+                    <td>{row.name}</td>
+                    <td>{row.completedRos}</td>
+                    <td>{row.finalHoursTotal.toFixed(1)}</td>
+                    <td>{row.estimatedHoursTotal.toFixed(1)}</td>
+                    <td>{row.difference.toFixed(1)}</td>
+                    <td>{row.averageFinalHours.toFixed(1)}</td>
+                    <td>{row.openRos}</td>
+                    <td>{row.inProgressRos}</td>
+                    <td>{row.acceptedRos}</td>
+                    <td>{row.waitingAcceptanceRos}</td>
+                    <td>{row.alertsSent}</td>
+                  </tr>
+                ))}
+                {!techPerformance.length && (
+                  <tr>
+                    <td colSpan="11">No techs match this report.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </section>
       )}
 
