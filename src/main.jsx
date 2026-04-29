@@ -25,8 +25,11 @@ import { auth, db } from "./firebase";
 import {
   buildTechPerformanceReport,
   filterJobsForReport,
+  filterHistoryJobs,
   generateSetupCode,
   getDateRangeFilter,
+  getJobCompletedTime,
+  getTechHourSummary,
   messageReasons,
   normalizeSkill,
   parseCdkText,
@@ -83,6 +86,13 @@ function App() {
   const [reportRange, setReportRange] = useState("month");
   const [reportTechId, setReportTechId] = useState("all");
   const [reportSkill, setReportSkill] = useState("all");
+  const [techTab, setTechTab] = useState("active");
+  const [techHistoryRange, setTechHistoryRange] = useState("month");
+  const [techHistorySearch, setTechHistorySearch] = useState("");
+  const [dispatcherHistoryRange, setDispatcherHistoryRange] = useState("month");
+  const [dispatcherHistoryTechId, setDispatcherHistoryTechId] = useState("all");
+  const [dispatcherHistorySkill, setDispatcherHistorySkill] = useState("all");
+  const [expandedJobId, setExpandedJobId] = useState("");
   const setupInProgress = useRef(false);
 
   const jobs = useCollection("jobs");
@@ -124,9 +134,21 @@ function App() {
 
   const selectedTech = currentTech ? (techs.find((t) => t.id === currentTech.id) || currentTech) : null;
   const visibleJobs = role === "dispatcher" ? jobs : jobs.filter((job) => selectedTech && job.assignedTechId === selectedTech.id);
-  const filteredJobs = visibleJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
+  const activeJobs = visibleJobs.filter((job) => job.status !== "Completed");
+  const filteredJobs = activeJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
   const openMessages = messages.filter((m) => m.status === "Open");
   const myNotifications = notifications.filter((n) => role === "dispatcher" ? n.audience === "Dispatch" : n.audience === selectedTech?.name);
+  const techHourSummary = selectedTech ? getTechHourSummary(jobs, selectedTech.id) : null;
+  const techHistoryJobs = selectedTech ? filterHistoryJobs(jobs, {
+    dateRange: techHistoryRange,
+    techId: selectedTech.id,
+    search: techHistorySearch
+  }) : [];
+  const dispatcherHistoryJobs = filterHistoryJobs(jobs, {
+    dateRange: dispatcherHistoryRange,
+    techId: dispatcherHistoryTechId,
+    skill: dispatcherHistorySkill
+  });
   const reportJobs = filterJobsForReport(jobs, { dateRange: reportRange, techId: reportTechId, skill: reportSkill });
   const completedReportJobs = reportJobs.filter((job) => job.status === "Completed");
   const totalFinalHours = sumHours(completedReportJobs, "finalHours");
@@ -151,6 +173,11 @@ function App() {
     { label: "Waiting acceptance", value: reportJobs.filter((job) => job.status === "Dispatched").length },
     { label: "In progress", value: reportJobs.filter((job) => job.status === "In Progress").length }
   ];
+
+  function formatCompletedDate(job) {
+    const millis = getJobCompletedTime(job);
+    return millis ? new Date(millis).toLocaleString() : "Not recorded";
+  }
 
   async function login() {
     try {
@@ -299,7 +326,14 @@ function App() {
   }
 
   async function complete(job) {
-    await changeJob(job, { status: "Completed", finalHours: job.finalHours ?? job.hours });
+    const finalHours = toSafeHours(job.finalHours ?? job.hours);
+    await changeJob(job, {
+      status: "Completed",
+      finalHours,
+      completedAt: serverTimestamp(),
+      completedByTechId: selectedTech?.id || job.assignedTechId || null,
+      completedByTechName: selectedTech?.name || job.assignedTechName || "Unknown tech"
+    });
     await addNotification("Dispatch", "RO Completed", `${job.assignedTechName} completed RO ${job.ro}.`, job.ro);
   }
 
@@ -376,10 +410,33 @@ function App() {
       <p className="notice">{notice}</p>
 
       <section className="grid stats">
-        <div className="card"><b>ROs</b><h2>{visibleJobs.length}</h2></div>
+        <div className="card"><b>ROs</b><h2>{activeJobs.length}</h2></div>
         <div className="card"><b>Notifications</b><h2>{myNotifications.length}</h2></div>
         <div className="card"><b>Tech Alerts</b><h2>{openMessages.length}</h2></div>
       </section>
+
+      {role === "tech" && techHourSummary && (
+        <section className="card reports">
+          <div className="report-header">
+            <div>
+              <h2>Tech Hours</h2>
+              <p>Completed work for {selectedTech?.name}.</p>
+            </div>
+            <div className="tabs">
+              <button className={techTab === "active" ? "tab active" : "tab"} onClick={() => setTechTab("active")}>Active</button>
+              <button className={techTab === "history" ? "tab active" : "tab"} onClick={() => setTechTab("history")}>History</button>
+            </div>
+          </div>
+          <div className="report-cards">
+            <div className="report-card"><span>Today completed hours</span><b>{techHourSummary.todayHours.toFixed(1)}</b></div>
+            <div className="report-card"><span>This week completed hours</span><b>{techHourSummary.weekHours.toFixed(1)}</b></div>
+            <div className="report-card"><span>This month completed hours</span><b>{techHourSummary.monthHours.toFixed(1)}</b></div>
+            <div className="report-card"><span>All-time completed hours</span><b>{techHourSummary.allTimeHours.toFixed(1)}</b></div>
+            <div className="report-card"><span>Completed RO count</span><b>{techHourSummary.completedCount}</b></div>
+            <div className="report-card"><span>Avg final hours per completed RO</span><b>{techHourSummary.averageFinalHours.toFixed(1)}</b></div>
+          </div>
+        </section>
+      )}
 
       {role === "dispatcher" && (
         <section className="grid two">
@@ -511,11 +568,146 @@ function App() {
         </section>
       )}
 
-      <section className="card">
-        <input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)} />
-      </section>
+      {role === "dispatcher" && (
+        <section className="card reports">
+          <div className="report-header">
+            <div>
+              <h2>Completed History</h2>
+              <p>Completed ROs across the shop.</p>
+            </div>
+            <div className="report-filters">
+              <Select value={dispatcherHistoryRange} onChange={setDispatcherHistoryRange}>
+                <option value="today">Today</option>
+                <option value="week">This Week</option>
+                <option value="month">This Month</option>
+                <option value="all">All Time</option>
+              </Select>
+              <Select value={dispatcherHistoryTechId} onChange={setDispatcherHistoryTechId}>
+                <option value="all">All techs</option>
+                {techs.map((tech) => <option value={tech.id} key={tech.id}>{tech.name}</option>)}
+              </Select>
+              <Select value={dispatcherHistorySkill} onChange={setDispatcherHistorySkill}>
+                <option value="all">All S-codes</option>
+                {skillTypes.map((skill) => <option value={skill} key={skill}>{skill}</option>)}
+              </Select>
+            </div>
+          </div>
 
-      <section className="jobs">
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>RO</th>
+                  <th>Tech</th>
+                  <th>Vehicle</th>
+                  <th>Skill</th>
+                  <th>Est Hours</th>
+                  <th>Final Hours</th>
+                  <th>Completed</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dispatcherHistoryJobs.map((job) => (
+                  <React.Fragment key={job.id}>
+                    <tr>
+                      <td>{job.ro}</td>
+                      <td>{job.completedByTechName || job.assignedTechName}</td>
+                      <td>{job.vehicle}</td>
+                      <td>{job.skill}</td>
+                      <td>{toSafeHours(job.hours).toFixed(1)}</td>
+                      <td>{toSafeHours(job.finalHours ?? job.hours).toFixed(1)}</td>
+                      <td>{formatCompletedDate(job)}</td>
+                      <td><Button variant="secondary" onClick={() => setExpandedJobId((id) => id === job.id ? "" : job.id)}>View</Button></td>
+                    </tr>
+                    {expandedJobId === job.id && (
+                      <tr className="detail-row">
+                        <td colSpan="8">
+                          <b>{job.concern}</b>
+                          <p>{job.notes}</p>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {!dispatcherHistoryJobs.length && (
+                  <tr><td colSpan="8">No completed ROs match these filters.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {role === "tech" && techTab === "history" && (
+        <section className="card reports">
+          <div className="report-header">
+            <div>
+              <h2>History</h2>
+              <p>Completed ROs assigned to you.</p>
+            </div>
+            <div className="report-filters">
+              <input placeholder="Search completed ROs" value={techHistorySearch} onChange={(e) => setTechHistorySearch(e.target.value)} />
+              <Select value={techHistoryRange} onChange={setTechHistoryRange}>
+                <option value="today">Today</option>
+                <option value="week">This Week</option>
+                <option value="month">This Month</option>
+                <option value="all">All Time</option>
+              </Select>
+            </div>
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>RO</th>
+                  <th>Vehicle</th>
+                  <th>Concern</th>
+                  <th>Skill</th>
+                  <th>Est Hours</th>
+                  <th>Final Hours</th>
+                  <th>Completed</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {techHistoryJobs.map((job) => (
+                  <React.Fragment key={job.id}>
+                    <tr>
+                      <td>{job.ro}</td>
+                      <td>{job.vehicle}</td>
+                      <td>{job.concern}</td>
+                      <td>{job.skill}</td>
+                      <td>{toSafeHours(job.hours).toFixed(1)}</td>
+                      <td><input className="hours-input" type="number" step="0.1" value={job.finalHours ?? job.hours} onChange={(e) => changeJob(job, { finalHours: toSafeHours(e.target.value) })} /></td>
+                      <td>{formatCompletedDate(job)}</td>
+                      <td><Button variant="secondary" onClick={() => setExpandedJobId((id) => id === job.id ? "" : job.id)}>View</Button></td>
+                    </tr>
+                    {expandedJobId === job.id && (
+                      <tr className="detail-row">
+                        <td colSpan="8">
+                          <b>{job.concern}</b>
+                          <p>{job.notes}</p>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                {!techHistoryJobs.length && (
+                  <tr><td colSpan="8">No completed ROs match your history filters.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {(role === "dispatcher" || techTab === "active") && <section className="card">
+        <input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)} />
+      </section>}
+
+      {(role === "dispatcher" || techTab === "active") && <section className="jobs">
         {filteredJobs.map((job) => (
           <article className="card" key={job.id}>
             <h2>RO {job.ro}</h2>
@@ -541,7 +733,7 @@ function App() {
                 <Button variant="accept" disabled={job.status !== "Dispatched"} onClick={() => accept(job)}>Accept</Button>
                 <Button disabled={job.status !== "Accepted"} onClick={() => start(job)}>Start</Button>
                 <Button disabled={job.status !== "In Progress"} onClick={() => complete(job)}>Complete</Button>
-                {job.status === "Completed" && (
+                {["Accepted", "In Progress"].includes(job.status) && (
                   <input type="number" step="0.1" value={job.finalHours ?? job.hours} onChange={(e) => changeJob(job, { finalHours: toSafeHours(e.target.value) })} />
                 )}
                 <Select value={(messageDrafts[job.id]?.reason) || "Wrong Skill"} onChange={(v) => setMessageDrafts((d) => ({ ...d, [job.id]: { ...(d[job.id] || {}), reason: v } }))}>
@@ -553,7 +745,7 @@ function App() {
             )}
           </article>
         ))}
-      </section>
+      </section>}
     </main>
   );
 }

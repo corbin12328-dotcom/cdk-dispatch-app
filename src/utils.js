@@ -15,7 +15,7 @@ export function toSafeHours(value) {
   return Math.round(parsed * 10) / 10;
 }
 
-function toMillis(value) {
+export function toMillis(value) {
   if (!value) return 0;
   if (typeof value.toMillis === "function") return value.toMillis();
   if (value instanceof Date) return value.getTime();
@@ -26,6 +26,28 @@ function toMillis(value) {
 
 function startOfToday(now = new Date()) {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+}
+
+export function isToday(value, now = new Date()) {
+  const millis = toMillis(value);
+  const start = startOfToday(now);
+  return millis >= start && millis < start + 24 * 60 * 60 * 1000;
+}
+
+export function isThisWeek(value, now = new Date()) {
+  const millis = toMillis(value);
+  const { start, end } = getDateRangeFilter("week", now);
+  return millis >= start && millis < end;
+}
+
+export function isThisMonth(value, now = new Date()) {
+  const millis = toMillis(value);
+  const { start, end } = getDateRangeFilter("month", now);
+  return millis >= start && millis < end;
+}
+
+export function getJobCompletedTime(job) {
+  return toMillis(job.completedAt) || toMillis(job.updatedAt) || toMillis(job.createdAt);
 }
 
 export function getDateRangeFilter(range, now = new Date()) {
@@ -52,7 +74,7 @@ export function getDateRangeFilter(range, now = new Date()) {
 export function filterJobsForReport(jobs, { dateRange = "all", techId = "all", skill = "all" } = {}) {
   const { start, end } = getDateRangeFilter(dateRange);
   return jobs.filter((job) => {
-    const jobTime = toMillis(job.updatedAt) || toMillis(job.createdAt);
+    const jobTime = job.status === "Completed" ? getJobCompletedTime(job) : toMillis(job.updatedAt) || toMillis(job.createdAt);
     const inDateRange = start === null || (jobTime >= start && jobTime < end);
     const matchesTech = techId === "all" || job.assignedTechId === techId;
     const matchesSkill = skill === "all" || job.skill === skill;
@@ -65,6 +87,43 @@ export function sumHours(items, field = "hours") {
     const value = field === "finalHours" ? item.finalHours ?? item.hours : item[field];
     return total + toSafeHours(value);
   }, 0);
+}
+
+export function getCompletedJobsForTech(jobs, techId) {
+  return jobs.filter((job) => job.status === "Completed" && job.assignedTechId === techId);
+}
+
+export function getTechHourSummary(jobs, techId) {
+  const completedJobs = getCompletedJobsForTech(jobs, techId);
+  const todayJobs = completedJobs.filter((job) => isToday(job.completedAt || job.updatedAt));
+  const weekJobs = completedJobs.filter((job) => isThisWeek(job.completedAt || job.updatedAt));
+  const monthJobs = completedJobs.filter((job) => isThisMonth(job.completedAt || job.updatedAt));
+  const allTimeHours = sumHours(completedJobs, "finalHours");
+
+  return {
+    todayHours: sumHours(todayJobs, "finalHours"),
+    weekHours: sumHours(weekJobs, "finalHours"),
+    monthHours: sumHours(monthJobs, "finalHours"),
+    allTimeHours,
+    completedCount: completedJobs.length,
+    averageFinalHours: completedJobs.length ? allTimeHours / completedJobs.length : 0
+  };
+}
+
+export function filterHistoryJobs(jobs, { dateRange = "all", techId = "all", skill = "all", search = "" } = {}) {
+  const { start, end } = getDateRangeFilter(dateRange);
+  const term = search.trim().toLowerCase();
+
+  return jobs.filter((job) => {
+    if (job.status !== "Completed") return false;
+    const completedTime = getJobCompletedTime(job);
+    const inDateRange = start === null || (completedTime >= start && completedTime < end);
+    const matchesTech = techId === "all" || job.assignedTechId === techId || job.completedByTechId === techId;
+    const matchesSkill = skill === "all" || job.skill === skill;
+    const searchable = [job.ro, job.vehicle, job.concern, job.skill].join(" ").toLowerCase();
+    const matchesSearch = !term || searchable.includes(term);
+    return inDateRange && matchesTech && matchesSkill && matchesSearch;
+  });
 }
 
 export function buildTechPerformanceReport(jobs, techs, messages = []) {
