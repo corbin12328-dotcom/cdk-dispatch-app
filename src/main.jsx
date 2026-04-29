@@ -87,11 +87,13 @@ function App() {
   const [reportTechId, setReportTechId] = useState("all");
   const [reportSkill, setReportSkill] = useState("all");
   const [techTab, setTechTab] = useState("active");
+  const [dispatcherTab, setDispatcherTab] = useState("ready");
   const [techHistoryRange, setTechHistoryRange] = useState("month");
   const [techHistorySearch, setTechHistorySearch] = useState("");
   const [dispatcherHistoryRange, setDispatcherHistoryRange] = useState("month");
   const [dispatcherHistoryTechId, setDispatcherHistoryTechId] = useState("all");
   const [dispatcherHistorySkill, setDispatcherHistorySkill] = useState("all");
+  const [dispatcherHistorySearch, setDispatcherHistorySearch] = useState("");
   const [expandedJobId, setExpandedJobId] = useState("");
   const setupInProgress = useRef(false);
 
@@ -135,7 +137,11 @@ function App() {
   const selectedTech = currentTech ? (techs.find((t) => t.id === currentTech.id) || currentTech) : null;
   const visibleJobs = role === "dispatcher" ? jobs : jobs.filter((job) => selectedTech && job.assignedTechId === selectedTech.id);
   const activeJobs = visibleJobs.filter((job) => job.status !== "Completed");
-  const filteredJobs = activeJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
+  const readyJobs = jobs.filter((job) => ["Ready", "Hold"].includes(job.status) && !job.assignedTechId);
+  const dispatchedJobs = jobs.filter((job) => ["Dispatched", "Accepted", "In Progress"].includes(job.status) && job.assignedTechId);
+  const dispatcherWorkJobs = dispatcherTab === "ready" ? readyJobs : dispatchedJobs;
+  const workListJobs = role === "dispatcher" ? dispatcherWorkJobs : activeJobs;
+  const filteredJobs = workListJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
   const openMessages = messages.filter((m) => m.status === "Open");
   const myNotifications = notifications.filter((n) => role === "dispatcher" ? n.audience === "Dispatch" : n.audience === selectedTech?.name);
   const techHourSummary = selectedTech ? getTechHourSummary(jobs, selectedTech.id) : null;
@@ -147,7 +153,8 @@ function App() {
   const dispatcherHistoryJobs = filterHistoryJobs(jobs, {
     dateRange: dispatcherHistoryRange,
     techId: dispatcherHistoryTechId,
-    skill: dispatcherHistorySkill
+    skill: dispatcherHistorySkill,
+    search: dispatcherHistorySearch
   });
   const reportJobs = filterJobsForReport(jobs, { dateRange: reportRange, techId: reportTechId, skill: reportSkill });
   const completedReportJobs = reportJobs.filter((job) => job.status === "Completed");
@@ -306,9 +313,44 @@ function App() {
   }
 
   async function dispatchAll() {
+    const workload = jobs.reduce((acc, current) => {
+      if (!current.assignedTechId || current.status === "Completed") return acc;
+      acc[current.assignedTechId] = (acc[current.assignedTechId] || 0) + toSafeHours(current.hours);
+      return acc;
+    }, {});
+    let dispatchedCount = 0;
+    let heldCount = 0;
+
     for (const job of jobs.filter((j) => j.status === "Ready" && !j.assignedTechId)) {
-      await dispatchJob(job);
+      const eligible = techs.filter((tech) => tech.active && tech.skills.includes(job.skill));
+      if (!eligible.length) {
+        await updateDoc(doc(db, "jobs", job.id), {
+          status: "Hold",
+          assignedTechId: null,
+          assignedTechName: "Unassigned",
+          updatedAt: serverTimestamp()
+        });
+        heldCount += 1;
+        continue;
+      }
+
+      const lowest = Math.min(...eligible.map((tech) => workload[tech.id] || 0));
+      const lightest = eligible.filter((tech) => (workload[tech.id] || 0) === lowest);
+      const tech = lightest[Math.floor(Math.random() * lightest.length)];
+
+      await updateDoc(doc(db, "jobs", job.id), {
+        status: "Dispatched",
+        assignedTechId: tech.id,
+        assignedTechName: tech.name,
+        updatedAt: serverTimestamp()
+      });
+      await addNotification(tech.name, "New RO Dispatched", `RO ${job.ro} was dispatched to you.`, job.ro);
+      workload[tech.id] = (workload[tech.id] || 0) + toSafeHours(job.hours);
+      dispatchedCount += 1;
     }
+
+    setDispatcherTab(dispatchedCount ? "dispatched" : "ready");
+    setNotice(`Randomized ${dispatchedCount} ready ROs.${heldCount ? ` Moved ${heldCount} to Hold.` : ""}`);
   }
 
   async function changeJob(job, patch) {
@@ -410,7 +452,7 @@ function App() {
       <p className="notice">{notice}</p>
 
       <section className="grid stats">
-        <div className="card"><b>ROs</b><h2>{activeJobs.length}</h2></div>
+        <div className="card"><b>ROs</b><h2>{role === "dispatcher" ? jobs.filter((job) => job.status !== "Completed").length : activeJobs.length}</h2></div>
         <div className="card"><b>Notifications</b><h2>{myNotifications.length}</h2></div>
         <div className="card"><b>Tech Alerts</b><h2>{openMessages.length}</h2></div>
       </section>
@@ -445,7 +487,7 @@ function App() {
             <textarea value={cdkText} onChange={(e) => setCdkText(e.target.value)} />
             <p>Format: RO, Vehicle, Concern, S-Code, Hours, Notes</p>
             <Button onClick={importRows}>Import</Button>
-            <Button variant="secondary" onClick={dispatchAll}>Dispatch All Ready</Button>
+            <Button variant="secondary" onClick={dispatchAll}>Randomize All Ready</Button>
           </div>
 
           <div className="card">
@@ -487,6 +529,27 @@ function App() {
               <Button variant="secondary" onClick={() => updateDoc(doc(db, "messages", m.id), { status: "Resolved" })}>Resolve</Button>
             </div>
           ))}
+        </section>
+      )}
+
+      {role === "dispatcher" && (
+        <section className="card">
+          <div className="report-header">
+            <div>
+              <h2>RO Workflow</h2>
+              <p>Ready ROs are unassigned. Dispatched ROs are assigned and still active.</p>
+            </div>
+            <div className="tabs">
+              <button className={dispatcherTab === "ready" ? "tab active" : "tab"} onClick={() => setDispatcherTab("ready")}>Ready</button>
+              <button className={dispatcherTab === "dispatched" ? "tab active" : "tab"} onClick={() => setDispatcherTab("dispatched")}>Dispatched</button>
+              <button className={dispatcherTab === "history" ? "tab active" : "tab"} onClick={() => setDispatcherTab("history")}>History</button>
+            </div>
+          </div>
+          <div className="report-cards">
+            <div className="report-card"><span>Ready or Hold</span><b>{readyJobs.length}</b></div>
+            <div className="report-card"><span>Dispatched active</span><b>{dispatchedJobs.length}</b></div>
+            <div className="report-card"><span>Completed history</span><b>{jobs.filter((job) => job.status === "Completed").length}</b></div>
+          </div>
         </section>
       )}
 
@@ -568,7 +631,7 @@ function App() {
         </section>
       )}
 
-      {role === "dispatcher" && (
+      {role === "dispatcher" && dispatcherTab === "history" && (
         <section className="card reports">
           <div className="report-header">
             <div>
@@ -576,6 +639,7 @@ function App() {
               <p>Completed ROs across the shop.</p>
             </div>
             <div className="report-filters">
+              <input placeholder="Search completed ROs" value={dispatcherHistorySearch} onChange={(e) => setDispatcherHistorySearch(e.target.value)} />
               <Select value={dispatcherHistoryRange} onChange={setDispatcherHistoryRange}>
                 <option value="today">Today</option>
                 <option value="week">This Week</option>
@@ -703,11 +767,11 @@ function App() {
         </section>
       )}
 
-      {(role === "dispatcher" || techTab === "active") && <section className="card">
-        <input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)} />
+      {((role === "dispatcher" && dispatcherTab !== "history") || (role === "tech" && techTab === "active")) && <section className="card">
+        <input placeholder={role === "dispatcher" ? `Search ${dispatcherTab} ROs` : "Search"} value={search} onChange={(e) => setSearch(e.target.value)} />
       </section>}
 
-      {(role === "dispatcher" || techTab === "active") && <section className="jobs">
+      {((role === "dispatcher" && dispatcherTab !== "history") || (role === "tech" && techTab === "active")) && <section className="jobs">
         {filteredJobs.map((job) => (
           <article className="card" key={job.id}>
             <h2>RO {job.ro}</h2>
@@ -718,7 +782,7 @@ function App() {
 
             {role === "dispatcher" && (
               <div className="actions">
-                <Button onClick={() => dispatchJob(job)}>Random Dispatch</Button>
+                {["Ready", "Hold"].includes(job.status) && !job.assignedTechId && <Button onClick={() => dispatchJob(job)}>Random Dispatch</Button>}
                 <Select value={job.skill} onChange={(v) => changeJob(job, { skill: normalizeSkill(v) })}>
                   {["Uncoded", ...skillTypes].map((s) => <option key={s}>{s}</option>)}
                 </Select>
