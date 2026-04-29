@@ -383,6 +383,59 @@ function App() {
     await updateDoc(doc(db, "jobs", job.id), { ...patch, updatedAt: serverTimestamp() });
   }
 
+  async function reassignJob(job, techId) {
+    const previousTechName = job.assignedTechName || "Unassigned";
+
+    if (techId === "unassigned") {
+      await changeJob(job, {
+        assignedTechId: null,
+        assignedTechName: "Unassigned",
+        status: "Ready"
+      });
+      await addDoc(collection(db, "messages"), {
+        jobId: job.id,
+        ro: job.ro,
+        vehicle: job.vehicle,
+        currentSkill: job.skill,
+        previousTechName,
+        newTechName: "Unassigned",
+        changedBy: user?.email || dispatcherEmail,
+        changedAt: serverTimestamp(),
+        reason: "Tech Reassignment",
+        note: `RO ${job.ro} was moved from ${previousTechName} to Unassigned.`,
+        status: "Resolved",
+        createdAt: serverTimestamp()
+      });
+      setNotice(`RO ${job.ro} moved to Ready / Unassigned.`);
+      return;
+    }
+
+    const newTech = techs.find((tech) => tech.id === techId);
+    if (!newTech) return;
+
+    await changeJob(job, {
+      assignedTechId: newTech.id,
+      assignedTechName: newTech.name,
+      status: "Dispatched"
+    });
+    await addNotification(newTech.name, "RO Assigned", `RO ${job.ro} was assigned to you by dispatch.`, job.ro);
+    await addDoc(collection(db, "messages"), {
+      jobId: job.id,
+      ro: job.ro,
+      vehicle: job.vehicle,
+      currentSkill: job.skill,
+      previousTechName,
+      newTechName: newTech.name,
+      changedBy: user?.email || dispatcherEmail,
+      changedAt: serverTimestamp(),
+      reason: "Tech Reassignment",
+      note: `RO ${job.ro} was reassigned from ${previousTechName} to ${newTech.name}.`,
+      status: "Resolved",
+      createdAt: serverTimestamp()
+    });
+    setNotice(`RO ${job.ro} assigned to ${newTech.name}.`);
+  }
+
   async function accept(job) {
     await changeJob(job, { status: "Accepted" });
     await addNotification("Dispatch", "RO Accepted", `${job.assignedTechName} accepted RO ${job.ro}.`, job.ro);
@@ -864,6 +917,12 @@ function App() {
             {role === "dispatcher" && (
               <div className="actions">
                 {["Ready", "Hold"].includes(job.status) && !job.assignedTechId && <Button onClick={() => dispatchJob(job)}>Random Dispatch</Button>}
+                <Select value={job.assignedTechId || "unassigned"} onChange={(v) => reassignJob(job, v)}>
+                  <option value="unassigned">Unassigned</option>
+                  {techs.filter((tech) => tech.active && tech.skills.includes(job.skill)).map((tech) => (
+                    <option value={tech.id} key={tech.id}>Change Tech: {tech.name}</option>
+                  ))}
+                </Select>
                 <Select value={job.skill} onChange={(v) => changeJob(job, { skill: normalizeSkill(v) })}>
                   {["Uncoded", ...skillTypes].map((s) => <option key={s}>{s}</option>)}
                 </Select>
