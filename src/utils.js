@@ -1,6 +1,14 @@
 export const skillTypes = ["S10 Maintenance", "S12 Driveability", "S13 Warranty", "S14 Heavy Line", "S16 Transmission", "S17 EV", "S18 HVAC", "S19 Diesel"];
 export const statuses = ["Ready", "Dispatched", "Accepted", "In Progress", "Hold", "Completed"];
-export const messageReasons = ["Wrong Skill", "Already Being Worked By Another Tech", "Need Dispatch Help"];
+export const messageReasons = [
+  "Wrong Skill",
+  "Already Being Worked By Another Tech",
+  "Need Parts",
+  "Need More Info",
+  "Cannot Duplicate Concern",
+  "Vehicle Not Here",
+  "Need Dispatch Help"
+];
 
 export function generateSetupCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -132,7 +140,7 @@ export function buildTechPerformanceReport(jobs, techs, messages = []) {
     const completedJobs = techJobs.filter((job) => job.status === "Completed");
     const finalHoursTotal = sumHours(completedJobs, "finalHours");
     const estimatedHoursTotal = sumHours(completedJobs, "hours");
-    const alertsSent = messages.filter((message) => message.fromTech === tech.name).length;
+    const alertsSent = messages.filter((message) => message.fromTechId === tech.id || message.fromTechName === tech.name || message.fromTech === tech.name).length;
 
     return {
       techId: tech.id,

@@ -11,6 +11,7 @@ import {
   addDoc,
   collection,
   deleteField,
+  deleteDoc,
   doc,
   getDocs,
   limit,
@@ -143,6 +144,7 @@ function App() {
   const workListJobs = role === "dispatcher" ? dispatcherWorkJobs : activeJobs;
   const filteredJobs = workListJobs.filter((job) => JSON.stringify(job).toLowerCase().includes(search.toLowerCase()));
   const openMessages = messages.filter((m) => m.status === "Open");
+  const resolvedMessages = messages.filter((m) => m.status === "Resolved");
   const myNotifications = notifications.filter((n) => role === "dispatcher" ? n.audience === "Dispatch" : n.audience === selectedTech?.name);
   const techHourSummary = selectedTech ? getTechHourSummary(jobs, selectedTech.id) : null;
   const techHistoryJobs = selectedTech ? filterHistoryJobs(jobs, {
@@ -184,6 +186,12 @@ function App() {
   function formatCompletedDate(job) {
     const millis = getJobCompletedTime(job);
     return millis ? new Date(millis).toLocaleString() : "Not recorded";
+  }
+
+  function formatMessageDate(message) {
+    const rawCreatedAt = typeof message.createdAt?.toMillis === "function" ? message.createdAt.toMillis() : message.createdAt;
+    const createdAt = Number(rawCreatedAt) || Date.parse(rawCreatedAt) || 0;
+    return createdAt ? new Date(createdAt).toLocaleString() : "Not recorded";
   }
 
   async function login() {
@@ -280,6 +288,24 @@ function App() {
     setNewTechName("");
     setNewTechSkills([]);
     setNotice(`Tech added. Setup code: ${setupCode}`);
+  }
+
+  async function deleteTech(tech) {
+    const confirmed = window.confirm("Delete this tech? Their active assigned ROs will be moved back to Ready / Unassigned.");
+    if (!confirmed) return;
+
+    const activeAssignedJobs = jobs.filter((job) => job.assignedTechId === tech.id && job.status !== "Completed");
+    for (const job of activeAssignedJobs) {
+      await updateDoc(doc(db, "jobs", job.id), {
+        assignedTechId: null,
+        assignedTechName: "Unassigned",
+        status: "Ready",
+        updatedAt: serverTimestamp()
+      });
+    }
+
+    await deleteDoc(doc(db, "techs", tech.id));
+    setNotice(`${tech.name} deleted. ${activeAssignedJobs.length} active ROs moved back to Ready.`);
   }
 
   async function importRows() {
@@ -382,20 +408,44 @@ function App() {
   async function sendDispatchMessage(job) {
     if (!selectedTech) return;
     const draft = messageDrafts[job.id] || { reason: "Wrong Skill", note: "" };
+    const reason = draft.reason || "Wrong Skill";
+    const note = draft.note ?? "";
     await addDoc(collection(db, "messages"), {
       jobId: job.id,
       ro: job.ro,
       vehicle: job.vehicle,
       currentSkill: job.skill,
-      assignedTech: job.assignedTechName,
-      fromTech: selectedTech.name,
-      reason: draft.reason,
-      note: draft.note || "",
+      assignedTechId: job.assignedTechId || selectedTech.id,
+      assignedTechName: job.assignedTechName || selectedTech.name,
+      fromTechId: selectedTech.id,
+      fromTechName: selectedTech.name,
+      reason,
+      note,
       status: "Open",
       createdAt: serverTimestamp()
     });
-    await addNotification("Dispatch", "Tech Message", `${selectedTech.name}: ${draft.reason} on RO ${job.ro}.`, job.ro);
-    setNotice("Message sent to dispatch.");
+    await addNotification("Dispatch", "Tech Message", `${selectedTech.name} sent a message on RO ${job.ro}: ${reason}${note ? ` - ${note}` : ""}`, job.ro);
+    setMessageDrafts((drafts) => ({ ...drafts, [job.id]: { reason, note: "" } }));
+    setNotice("Message sent to dispatch");
+  }
+
+  async function resolveMessage(message) {
+    await updateDoc(doc(db, "messages", message.id), {
+      status: "Resolved",
+      resolvedAt: serverTimestamp(),
+      resolvedBy: user?.email || dispatcherEmail
+    });
+    setNotice(`Message for RO ${message.ro} resolved.`);
+  }
+
+  function jumpToMessageRo(message) {
+    const targetJob = jobs.find((job) => job.id === message.jobId || job.ro === message.ro);
+    if (targetJob?.status === "Completed") setDispatcherTab("history");
+    else if (targetJob?.assignedTechId) setDispatcherTab("dispatched");
+    else setDispatcherTab("ready");
+    setSearch(message.ro || "");
+    setDispatcherHistorySearch(message.ro || "");
+    setNotice(`Filtered to RO ${message.ro}.`);
   }
 
   if (!authReady && user) {
@@ -512,6 +562,7 @@ function App() {
                   <b>{tech.name}</b>
                   <span>{tech.email || "Not set up"}</span>
                   {tech.setupCode && <code>{tech.setupCode}</code>}
+                  <Button variant="warn" onClick={() => deleteTech(tech)}>Delete</Button>
                 </div>
               ))}
             </div>
@@ -520,15 +571,45 @@ function App() {
       )}
 
       {role === "dispatcher" && (
-        <section className="card">
-          <h2>Messages To Dispatch</h2>
+        <section className="card messages">
+          <div className="report-header">
+            <div>
+              <h2>Messages To Dispatch</h2>
+              <p>Open messages are shown first.</p>
+            </div>
+          </div>
+
+          <h3>Open</h3>
           {openMessages.map((m) => (
-            <div className="alert" key={m.id}>
-              <b>RO {m.ro}: {m.reason}</b>
-              <p>{m.fromTech} - {m.note}</p>
-              <Button variant="secondary" onClick={() => updateDoc(doc(db, "messages", m.id), { status: "Resolved" })}>Resolve</Button>
+            <div className="alert message-item" key={m.id}>
+              <div>
+                <b>RO {m.ro}: {m.reason}</b>
+                <p>{m.vehicle} - {m.fromTechName || m.fromTech || m.assignedTechName || "Unknown tech"}</p>
+                <p><b>Note:</b> {m.note || "No note added."}</p>
+                <span>{formatMessageDate(m)}</span>
+              </div>
+              <div className="actions">
+                <Button variant="secondary" onClick={() => jumpToMessageRo(m)}>Jump to RO</Button>
+                <Button onClick={() => resolveMessage(m)}>Mark Resolved</Button>
+              </div>
             </div>
           ))}
+          {!openMessages.length && <p>No open messages.</p>}
+
+          <details>
+            <summary>Resolved Messages ({resolvedMessages.length})</summary>
+            {resolvedMessages.map((m) => (
+              <div className="alert message-item resolved" key={m.id}>
+                <div>
+                  <b>RO {m.ro}: {m.reason}</b>
+                  <p>{m.vehicle} - {m.fromTechName || m.fromTech || m.assignedTechName || "Unknown tech"}</p>
+                  <p><b>Note:</b> {m.note || "No note added."}</p>
+                  <span>{formatMessageDate(m)}</span>
+                </div>
+                <Button variant="secondary" onClick={() => jumpToMessageRo(m)}>Jump to RO</Button>
+              </div>
+            ))}
+          </details>
         </section>
       )}
 
@@ -803,8 +884,8 @@ function App() {
                 <Select value={(messageDrafts[job.id]?.reason) || "Wrong Skill"} onChange={(v) => setMessageDrafts((d) => ({ ...d, [job.id]: { ...(d[job.id] || {}), reason: v } }))}>
                   {messageReasons.map((r) => <option key={r}>{r}</option>)}
                 </Select>
-                <input placeholder="Message dispatch" onChange={(e) => setMessageDrafts((d) => ({ ...d, [job.id]: { ...(d[job.id] || {}), note: e.target.value } }))} />
-                <Button variant="warn" onClick={() => sendDispatchMessage(job)}>Message Dispatch</Button>
+                <input placeholder="Message dispatch" value={messageDrafts[job.id]?.note || ""} onChange={(e) => setMessageDrafts((d) => ({ ...d, [job.id]: { ...(d[job.id] || {}), note: e.target.value } }))} />
+                <Button variant="warn" onClick={() => sendDispatchMessage(job)}>Send Message</Button>
               </div>
             )}
           </article>
