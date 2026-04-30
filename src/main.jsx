@@ -24,6 +24,13 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 import {
+  getMessagingToken,
+  listenForForegroundNotifications,
+  requestNotificationPermission,
+  saveMessagingToken,
+  showForegroundNotification
+} from "./messaging";
+import {
   buildTechPerformanceReport,
   filterJobsForReport,
   filterHistoryJobs,
@@ -96,6 +103,7 @@ function App() {
   const [dispatcherHistorySkill, setDispatcherHistorySkill] = useState("all");
   const [dispatcherHistorySearch, setDispatcherHistorySearch] = useState("");
   const [expandedJobId, setExpandedJobId] = useState("");
+  const [notificationStatus, setNotificationStatus] = useState("idle");
   const setupInProgress = useRef(false);
 
   const jobs = useCollection("jobs");
@@ -134,6 +142,20 @@ function App() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (!user) return undefined;
+
+    let unsubscribe = () => {};
+    listenForForegroundNotifications(async (payload) => {
+      await showForegroundNotification(payload);
+      setNotice(payload?.notification?.body || payload?.data?.body || "New dispatch notification received.");
+    }).then((listener) => {
+      unsubscribe = listener;
+    }).catch(() => {});
+
+    return () => unsubscribe();
+  }, [user]);
 
   const selectedTech = currentTech ? (techs.find((t) => t.id === currentTech.id) || currentTech) : null;
   const visibleJobs = role === "dispatcher" ? jobs : jobs.filter((job) => selectedTech && job.assignedTechId === selectedTech.id);
@@ -267,8 +289,92 @@ function App() {
     }
   }
 
-  async function addNotification(audience, title, body, ro = "") {
-    await addDoc(collection(db, "notifications"), { audience, title, body, ro, read: false, createdAt: serverTimestamp() });
+  function buildPushPayload(audience, title, body, ro, eventType) {
+    return {
+      notification: { title, body },
+      data: {
+        audience,
+        eventType,
+        ro: ro || "",
+        url: "/"
+      },
+      webpush: {
+        fcmOptions: {
+          link: "/"
+        },
+        notification: {
+          icon: "/icon-192.png",
+          badge: "/icon-192.png"
+        }
+      }
+    };
+  }
+
+  async function getNotificationTarget(audience, targetTechId = "") {
+    if (audience === "Dispatch") {
+      const targetSnap = await getDocs(collection(db, "dispatchNotificationTargets"));
+      const activeTargets = targetSnap.docs
+        .map((target) => ({ id: target.id, ...target.data() }))
+        .filter((target) => target.active !== false && target.token);
+
+      return {
+        targetType: "dispatch",
+        targetIds: activeTargets.map((target) => target.id),
+        targetTokenCount: activeTargets.length
+      };
+    }
+
+    const targetTech = techs.find((tech) => tech.id === targetTechId || tech.name === audience);
+    const tokenCount = new Set([...(targetTech?.fcmTokens || []), targetTech?.fcmToken].filter(Boolean)).size;
+
+    return {
+      targetType: "tech",
+      targetTechId: targetTech?.id || targetTechId || "",
+      targetIds: targetTech?.id ? [targetTech.id] : [],
+      targetTokenCount: tokenCount
+    };
+  }
+
+  async function addNotification(audience, title, body, ro = "", options = {}) {
+    const eventType = options.eventType || "general";
+    const target = await getNotificationTarget(audience, options.targetTechId);
+    const pushPayload = buildPushPayload(audience, title, body, ro, eventType);
+
+    await addDoc(collection(db, "notifications"), {
+      audience,
+      title,
+      body,
+      ro,
+      read: false,
+      eventType,
+      pushPayload,
+      pushStatus: target.targetTokenCount ? "pending_backend_send_required" : "no_registered_token",
+      pushTodo: "TODO: Send this pushPayload with Firebase Admin SDK from a secure backend or Cloud Function. Do not send from the client.",
+      ...target,
+      createdAt: serverTimestamp()
+    });
+  }
+
+  async function enableNotifications() {
+    if (!user || !role) return;
+
+    setNotificationStatus("requesting");
+    try {
+      const permission = await requestNotificationPermission();
+      if (permission !== "granted") {
+        setNotificationStatus("blocked");
+        setNotice("Notifications were not enabled. Browser permission was not granted.");
+        return;
+      }
+
+      const token = await getMessagingToken();
+      await saveMessagingToken({ role, token, user, tech: selectedTech });
+      setNotificationStatus("enabled");
+      setNotice("Notifications enabled for this browser.");
+    } catch (error) {
+      setNotificationStatus("error");
+      setNotice(error.message);
+    }
   }
 
   async function addTech() {
@@ -325,6 +431,7 @@ function App() {
         assignedTechName: "Unassigned",
         updatedAt: serverTimestamp()
       });
+      await addNotification("Dispatch", "RO Moved To Hold", `RO ${job.ro} moved to Hold because no active tech has ${job.skill}.`, job.ro, { eventType: "ro_hold" });
       return;
     }
 
@@ -334,7 +441,7 @@ function App() {
       assignedTechName: tech.name,
       updatedAt: serverTimestamp()
     });
-    await addNotification(tech.name, "New RO Dispatched", `RO ${job.ro} was dispatched to you.`, job.ro);
+    await addNotification(tech.name, "New RO Dispatched", `RO ${job.ro} was dispatched to you.`, job.ro, { eventType: "ro_assigned", targetTechId: tech.id });
     setNotice(`RO ${job.ro} sent to ${tech.name}.`);
   }
 
@@ -356,6 +463,7 @@ function App() {
           assignedTechName: "Unassigned",
           updatedAt: serverTimestamp()
         });
+        await addNotification("Dispatch", "RO Moved To Hold", `RO ${job.ro} moved to Hold because no active tech has ${job.skill}.`, job.ro, { eventType: "ro_hold" });
         heldCount += 1;
         continue;
       }
@@ -370,7 +478,7 @@ function App() {
         assignedTechName: tech.name,
         updatedAt: serverTimestamp()
       });
-      await addNotification(tech.name, "New RO Dispatched", `RO ${job.ro} was dispatched to you.`, job.ro);
+      await addNotification(tech.name, "New RO Dispatched", `RO ${job.ro} was dispatched to you.`, job.ro, { eventType: "ro_assigned", targetTechId: tech.id });
       workload[tech.id] = (workload[tech.id] || 0) + toSafeHours(job.hours);
       dispatchedCount += 1;
     }
@@ -381,6 +489,32 @@ function App() {
 
   async function changeJob(job, patch) {
     await updateDoc(doc(db, "jobs", job.id), { ...patch, updatedAt: serverTimestamp() });
+  }
+
+  async function changeJobFromDispatch(job, patch) {
+    await changeJob(job, patch);
+
+    if (patch.skill && patch.skill !== job.skill) {
+      const audience = job.assignedTechName && job.assignedTechName !== "Unassigned" ? job.assignedTechName : "Dispatch";
+      await addNotification(
+        audience,
+        "RO Skill Changed",
+        `RO ${job.ro} skill changed from ${job.skill} to ${patch.skill}.`,
+        job.ro,
+        { eventType: "ro_skill_changed", targetTechId: job.assignedTechId }
+      );
+    }
+
+    if (patch.status === "Hold" && job.status !== "Hold") {
+      const audience = job.assignedTechName && job.assignedTechName !== "Unassigned" ? job.assignedTechName : "Dispatch";
+      await addNotification(
+        audience,
+        "RO Moved To Hold",
+        `RO ${job.ro} was moved to Hold by dispatch.`,
+        job.ro,
+        { eventType: "ro_hold", targetTechId: job.assignedTechId }
+      );
+    }
   }
 
   async function reassignJob(job, techId) {
@@ -418,7 +552,7 @@ function App() {
       assignedTechName: newTech.name,
       status: "Dispatched"
     });
-    await addNotification(newTech.name, "RO Assigned", `RO ${job.ro} was assigned to you by dispatch.`, job.ro);
+    await addNotification(newTech.name, "RO Assigned", `RO ${job.ro} was assigned to you by dispatch.`, job.ro, { eventType: "ro_reassigned", targetTechId: newTech.id });
     await addDoc(collection(db, "messages"), {
       jobId: job.id,
       ro: job.ro,
@@ -438,12 +572,12 @@ function App() {
 
   async function accept(job) {
     await changeJob(job, { status: "Accepted" });
-    await addNotification("Dispatch", "RO Accepted", `${job.assignedTechName} accepted RO ${job.ro}.`, job.ro);
+    await addNotification("Dispatch", "RO Accepted", `${job.assignedTechName} accepted RO ${job.ro}.`, job.ro, { eventType: "ro_accepted" });
   }
 
   async function start(job) {
     await changeJob(job, { status: "In Progress" });
-    await addNotification("Dispatch", "RO Started", `${job.assignedTechName} started RO ${job.ro}.`, job.ro);
+    await addNotification("Dispatch", "RO Started", `${job.assignedTechName} started RO ${job.ro}.`, job.ro, { eventType: "ro_started" });
   }
 
   async function complete(job) {
@@ -455,7 +589,7 @@ function App() {
       completedByTechId: selectedTech?.id || job.assignedTechId || null,
       completedByTechName: selectedTech?.name || job.assignedTechName || "Unknown tech"
     });
-    await addNotification("Dispatch", "RO Completed", `${job.assignedTechName} completed RO ${job.ro}.`, job.ro);
+    await addNotification("Dispatch", "RO Completed", `${job.assignedTechName} completed RO ${job.ro}.`, job.ro, { eventType: "ro_completed" });
   }
 
   async function sendDispatchMessage(job) {
@@ -477,7 +611,7 @@ function App() {
       status: "Open",
       createdAt: serverTimestamp()
     });
-    await addNotification("Dispatch", "Tech Message", `${selectedTech.name} sent a message on RO ${job.ro}: ${reason}${note ? ` - ${note}` : ""}`, job.ro);
+    await addNotification("Dispatch", "Tech Message", `${selectedTech.name} sent a message on RO ${job.ro}: ${reason}${note ? ` - ${note}` : ""}`, job.ro, { eventType: "tech_message" });
     setMessageDrafts((drafts) => ({ ...drafts, [job.id]: { reason, note: "" } }));
     setNotice("Message sent to dispatch");
   }
@@ -545,7 +679,12 @@ function App() {
           <h1>CDK RO Skill Dispatcher</h1>
           <p>Live shop dispatch board for CDK RO exports.</p>
         </div>
-        <Button variant="secondary" onClick={() => signOut(auth)}>Sign Out</Button>
+        <div className="actions">
+          <Button variant="secondary" onClick={enableNotifications} disabled={notificationStatus === "requesting"}>
+            Enable Notifications
+          </Button>
+          <Button variant="secondary" onClick={() => signOut(auth)}>Sign Out</Button>
+        </div>
       </header>
 
       <nav className="nav">
@@ -923,10 +1062,10 @@ function App() {
                     <option value={tech.id} key={tech.id}>Change Tech: {tech.name}</option>
                   ))}
                 </Select>
-                <Select value={job.skill} onChange={(v) => changeJob(job, { skill: normalizeSkill(v) })}>
+                <Select value={job.skill} onChange={(v) => changeJobFromDispatch(job, { skill: normalizeSkill(v) })}>
                   {["Uncoded", ...skillTypes].map((s) => <option key={s}>{s}</option>)}
                 </Select>
-                <Select value={job.status} onChange={(v) => changeJob(job, { status: v })}>
+                <Select value={job.status} onChange={(v) => changeJobFromDispatch(job, { status: v })}>
                   {statuses.map((s) => <option key={s}>{s}</option>)}
                 </Select>
               </div>
